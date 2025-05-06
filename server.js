@@ -14,7 +14,7 @@ let bots = [];
 let botCount = 0;
 const maxBots = 20;
 const maxPrivateBots = 5;
-let userInfo = { points: 0 };
+let userInfo = { points: 0, userId: 'guest' }; // Default user
 
 // Check if file exists
 async function fileExists(filePath) {
@@ -26,7 +26,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Initialize data files if they don't exist
+// Initialize data files
 async function initializeDataFiles() {
   const botDataPath = path.join(DATA_DIR, 'bot_data.json');
   const userDataPath = path.join(DATA_DIR, 'user_data.json');
@@ -38,7 +38,7 @@ async function initializeDataFiles() {
 
   if (!(await fileExists(userDataPath))) {
     console.log(`Creating user_data.json at ${userDataPath}`);
-    await fs.writeFile(userDataPath, JSON.stringify({ points: 0 }, null, 2));
+    await fs.writeFile(userDataPath, JSON.stringify({ points: 0, userId: 'guest' }, null, 2));
   }
 }
 
@@ -67,16 +67,17 @@ async function loadData() {
       const userData = await fs.readFile(userDataPath, 'utf8');
       userInfo = JSON.parse(userData);
       userInfo.points = Number(userInfo.points) || 0;
-      console.log(`Loaded user data: Points=${userInfo.points}`);
+      userInfo.userId = userInfo.userId || 'guest';
+      console.log(`Loaded user data: Points=${userInfo.points}, UserId=${userInfo.userId}`);
     } catch (error) {
       console.error(`Error loading user_data.json: ${error.message}`);
-      userInfo = { points: 0 };
-      await fs.writeFile(userDataPath, JSON.stringify({ points: 0 }, null, 2));
+      userInfo = { points: 0, userId: 'guest' };
+      await fs.writeFile(userDataPath, JSON.stringify({ points: 0, userId: 'guest' }, null, 2));
       console.log('Initialized empty user_data.json due to load error');
     }
   } catch (error) {
     console.error(`Error initializing data files: ${error.message}`);
-    throw error; // Fatal error, stop server
+    throw error;
   }
 }
 
@@ -90,7 +91,7 @@ async function saveBots() {
 
 async function saveUserData() {
   try {
-    await fs.writeFile(path.join(DATA_DIR, 'user_data.json'), JSON.stringify({ points: userInfo.points }, null, 2));
+    await fs.writeFile(path.join(DATA_DIR, 'user_data.json'), JSON.stringify(userInfo, null, 2));
   } catch (error) {
     throw error;
   }
@@ -100,8 +101,8 @@ async function saveUserData() {
 loadData().then(() => {
   // API: Create a bot
   app.post('/api/bots', async (req, res) => {
-    const { username, isPrivate } = req.body;
-    console.log(`Create bot attempt: Username=${username}, Private=${isPrivate}, Points=${userInfo.points}, TotalBots=${botCount}, PrivateBots=${bots.filter(bot => bot.isPrivate).length}`);
+    const { username, isPrivate, userId } = req.body;
+    console.log(`Create bot attempt: Username=${username}, Private=${isPrivate}, UserId=${userId}, Points=${userInfo.points}, TotalBots=${botCount}, PrivateBots=${bots.filter(bot => bot.isPrivate).length}`);
 
     // Validation 1: Private checkbox
     if (!isPrivate) {
@@ -118,10 +119,10 @@ loadData().then(() => {
       return res.status(400).json({ error: 'Maximum bot limit (20) reached!' });
     }
 
-    // Validation 4: Private bot limit
-    const privateBotCount = bots.filter(bot => bot.isPrivate).length;
-    if (privateBotCount >= maxPrivateBots) {
-      return res.status(400).json({ error: 'Maximum private bot limit (5) reached!' });
+    // Validation 4: Private bot limit (per user)
+    const userPrivateBotCount = bots.filter(bot => bot.isPrivate && bot.userId === userId).length;
+    if (userPrivateBotCount >= maxPrivateBots) {
+      return res.status(400).json({ error: 'Maximum private bot limit (5) reached for this user!' });
     }
 
     // Validation 5: Points
@@ -148,14 +149,15 @@ loadData().then(() => {
       status: 'Waiting for Verification',
       createdAt: new Date().toISOString(),
       verificationDeadline: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      isPrivate: true
+      isPrivate: true,
+      userId: userId || 'guest' // Associate bot with user
     };
 
     bots.push(bot);
     botCount++;
     try {
       await saveBots();
-      console.log(`Bot saved: ${username}, Private: true`);
+      console.log(`Bot saved: ${username}, Private: true, UserId: ${bot.userId}`);
       res.json({ message: `Bot ${username} created successfully! 250 points deducted.`, bot });
     } catch (error) {
       bots.pop();
@@ -175,6 +177,22 @@ loadData().then(() => {
   // API: Get bots
   app.get('/api/bots', (req, res) => {
     res.json(bots);
+  });
+
+  // API: Verify bot
+  app.post('/api/bots/verify/:botId', (req, res) => {
+    const { botId } = req.params;
+    const bot = bots.find(b => b.id === botId);
+    if (!bot) {
+      return res.status(404).json({ error: 'Bot not found.' });
+    }
+    bot.status = 'Verified';
+    saveBots().then(() => {
+      res.json({ message: `Bot ${bot.username} verified.` });
+    }).catch(error => {
+      console.error('Failed to save bots:', error);
+      res.status(500).json({ error: 'Error verifying bot.' });
+    });
   });
 
   // Start server
